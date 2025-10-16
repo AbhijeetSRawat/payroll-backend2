@@ -75,7 +75,7 @@ connectDB();
 app.use(express.json());                    // Parse JSON request bodies
 app.use(cookieParser());                    // Parse cookies
 app.use(cors({
-  origin: ['http://localhost:5173', 'https://masu-frontend.vercel.app'],
+  origin: ['http://localhost:5173', 'https://payroll-frontned2.vercel.app'],
   credentials: true,
 }));                                        // Handle CORS for allowed origins
 app.use(fileUpload({
