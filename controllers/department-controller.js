@@ -44,7 +44,7 @@ export const createDepartment = async (req, res) => {
 
     await department.save();
     
-     await Employee.findByIdAndUpdate(manager, { 'employmentDetails.department': department._id });
+    
     return res.status(201).json({ success: true, message: 'Department created', data: department });
 
   } catch (error) {
