@@ -12,27 +12,23 @@ import { calculateTotalFlexiAmount } from '../utils/flexiCalculations.js';
 // @route   POST /api/ctc/employee
 // @access  Private/Admin/HR
 export const createCTCAnnexure = asyncHandler(async (req, res) => {
-  const { employee, annualCTC, financialYear,  companyId,includeFlexiBenefits = false, } = req.body;
+  const { 
+    employee, 
+    annualCTC, 
+    financialYear,  
+    companyId,
+    includeFlexiBenefits = false,
+    useTemplate = true,
+    customComponents = [] // 👈 New input: custom salary structure
+  } = req.body;
 
-  // Get company template
-  const template = await CTCTemplate.findOne({ 
-    company: companyId,
-    isActive: true 
-  });
-
-  if (!template) {
-    return res.status(404).json({
-      success: false,
-      message: 'Please setup CTC template for your company first'
-    });
+  let template = null;
+  if (useTemplate) {
+    template = await CTCTemplate.findOne({ company: companyId, isActive: true });
   }
 
-  // Validate employee exists and belongs to company
-  const employeeRecord = await Employee.findOne({
-    _id: employee,
-    company: companyId
-  });
-
+  // ✅ Validate employee
+  const employeeRecord = await Employee.findOne({ _id: employee, company: companyId });
   if (!employeeRecord) {
     return res.status(404).json({
       success: false,
@@ -40,86 +36,184 @@ export const createCTCAnnexure = asyncHandler(async (req, res) => {
     });
   }
 
-  // Check if CTC already exists for this employee and financial year
+  // ✅ Check for existing CTC
   const existingCTC = await CTCAnnexure.findOne({
     employee,
-    financialYear: financialYear || template.financialYear
+    financialYear: financialYear || template?.financialYear
   });
 
   if (existingCTC) {
-     return res.status(400).json({
+    return res.status(400).json({
       success: false,
       message: 'CTC annexure already exists for this employee for the specified financial year'
     });
   }
 
-  // Calculate CTC breakdown using template
-  const { breakdown, summary } = calculateCTCFromTemplate(annualCTC, template);
+  // ==============================================
+  // CASE 1: Company uses a template
+  // ==============================================
+  let breakdown = [];
+  let summary = {};
 
-  // Calculate flexi amount if included
-  let flexiData = {
-    hasFlexiBenefits: false,
-    totalFlexiAmount: 0
-  };
+  if (template) {
+    const result = calculateCTCFromTemplate(annualCTC, template);
+    breakdown = result.breakdown;
+    summary = result.summary;
+  } else {
+    // ==============================================
+    // CASE 2: No template (use fallback or custom)
+    // ==============================================
+    if (customComponents.length > 0) {
+      // ✅ Custom structure from client
+      let totalAmount = 0;
+
+      breakdown = customComponents.map(comp => {
+        let annualAmount = 0;
+
+        if (comp.percentage) {
+          annualAmount = Math.round(annualCTC * (comp.percentage / 100));
+        } else if (comp.fixed) {
+          annualAmount = comp.fixed;
+        }
+
+        totalAmount += annualAmount;
+
+        return {
+          salaryHead: comp.name,
+          annualAmount,
+          monthlyAmount: Math.round(annualAmount / 12),
+          calculationBasis: comp.percentage ? `${comp.percentage}% of CTC` : 'Fixed',
+          exemptionLimit: comp.exemptionLimit || 'N/A',
+          taxableAmount: comp.isTaxable ? annualAmount : 0,
+          isFlexiComponent: false
+        };
+      });
+
+      // Adjust if total < CTC (assign remainder to Special Allowance)
+      if (totalAmount < annualCTC) {
+        const remaining = annualCTC - totalAmount;
+        breakdown.push({
+          salaryHead: 'Special Allowance',
+          annualAmount: remaining,
+          monthlyAmount: Math.round(remaining / 12),
+          calculationBasis: 'Remaining from CTC',
+          exemptionLimit: 'N/A',
+          taxableAmount: remaining,
+          isFlexiComponent: false
+        });
+      }
+
+    } else {
+      // ✅ Default fallback if no custom structure provided
+      const basic = Math.round(annualCTC * 0.4);
+      const hra = Math.round(basic * 0.5);
+      const pfEmployer = Math.round(basic * 0.12);
+      const specialAllowance = Math.max(0, annualCTC - (basic + hra + pfEmployer));
+
+      breakdown = [
+        {
+          salaryHead: 'Basic',
+          annualAmount: basic,
+          monthlyAmount: Math.round(basic / 12),
+          calculationBasis: '40% of CTC',
+          exemptionLimit: 'N/A',
+          taxableAmount: basic,
+          isFlexiComponent: false
+        },
+        {
+          salaryHead: 'HRA',
+          annualAmount: hra,
+          monthlyAmount: Math.round(hra / 12),
+          calculationBasis: '50% of Basic',
+          exemptionLimit: 'As per Income Tax Rules',
+          taxableAmount: hra,
+          isFlexiComponent: false
+        },
+        {
+          salaryHead: 'Employer PF Contribution',
+          annualAmount: pfEmployer,
+          monthlyAmount: Math.round(pfEmployer / 12),
+          calculationBasis: '12% of Basic',
+          exemptionLimit: 'As per PF Rules',
+          taxableAmount: 0,
+          isFlexiComponent: false
+        },
+        {
+          salaryHead: 'Special Allowance',
+          annualAmount: specialAllowance,
+          monthlyAmount: Math.round(specialAllowance / 12),
+          calculationBasis: 'Remaining from CTC',
+          exemptionLimit: 'N/A',
+          taxableAmount: specialAllowance,
+          isFlexiComponent: false
+        }
+      ];
+    }
+
+    // ✅ Summary calculation
+    const totalEarnings = breakdown.reduce((sum, item) => sum + item.annualAmount, 0);
+    summary = {
+      fixedSalary: totalEarnings,
+      flexiBenefits: 0,
+      reimbursement: 0,
+      benefits: 0,
+      totalGrossEarning: totalEarnings,
+      totalDeductions: 0,
+      netSalary: totalEarnings,
+      difference: annualCTC - totalEarnings
+    };
+  }
+
+  // ==============================================
+  // Add Flexi Benefits (optional)
+  // ==============================================
+  let flexiData = { hasFlexiBenefits: false, totalFlexiAmount: 0 };
 
   if (includeFlexiBenefits) {
     const basicSalaryComponent = breakdown.find(item => item.salaryHead === 'Basic');
     const basicSalary = basicSalaryComponent ? basicSalaryComponent.annualAmount : 0;
-    
-    // Calculate flexi amount based on company policy (typically 20-40% of basic)
     const flexiAmount = calculateTotalFlexiAmount(basicSalary, 'Basic Salary', 30, 0);
-    
-    flexiData = {
-      hasFlexiBenefits: true,
-      totalFlexiAmount: flexiAmount
-    };
 
-    // Add flexi components to breakdown
+    flexiData = { hasFlexiBenefits: true, totalFlexiAmount: flexiAmount };
+
     breakdown.push({
       salaryHead: 'Flexi Benefits Basket',
       annualAmount: flexiAmount,
       monthlyAmount: Math.round(flexiAmount / 12),
       calculationBasis: '30% of Basic Salary',
       exemptionLimit: 'As per employee declaration and tax rules',
-      taxableAmount: 0, // Will be determined after flexi declaration
+      taxableAmount: 0,
       isFlexiComponent: true
     });
+
+    summary.flexiBenefits = flexiAmount;
   }
 
-  // Create CTC annexure
+  // ==============================================
+  // Save Annexure
+  // ==============================================
   const ctcAnnexure = new CTCAnnexure({
     company: companyId,
     employee,
-    template: template._id,
-    financialYear: financialYear || template.financialYear,
+    template: template?._id || null,
+    financialYear: financialYear || template?.financialYear || new Date().getFullYear(),
     annualCTC,
     monthlyBreakup: breakdown,
-    summary: {
-      ...summary,
-      flexiBenefits: flexiData.totalFlexiAmount
-    },
+    summary,
     hasFlexiBenefits: flexiData.hasFlexiBenefits,
     totalFlexiAmount: flexiData.totalFlexiAmount,
     status: 'Active'
   });
 
   const savedAnnexure = await ctcAnnexure.save();
-  
-  // await createAuditLog(
-  //   req.user._id, 
-  //   companyId, 
-  //   'CTC Annexure Created', 
-  //   { 
-  //     annexureId: savedAnnexure._id, 
-  //     employee: employeeRecord.employeeId, 
-  //     annualCTC: annualCTC,
-  //     hasFlexiBenefits: flexiData.hasFlexiBenefits
-  //   }
-  // );
 
   res.status(201).json({
     success: true,
-    message: 'CTC annexure created successfully',
+    message: template
+      ? 'CTC annexure created using company template'
+      : (customComponents.length > 0
+          ? 'CTC annexure created using custom structure'
+          : 'CTC annexure created with default structure'),
     data: savedAnnexure,
     flexiEligible: flexiData.hasFlexiBenefits
   });

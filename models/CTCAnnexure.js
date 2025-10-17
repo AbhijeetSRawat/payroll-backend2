@@ -17,7 +17,6 @@ const CTCAnnexureSchema = new mongoose.Schema(
     template: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "CTCTemplate",
-      required: true,
       comment: "Reference to the CTC template used",
     },
     financialYear: {

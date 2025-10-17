@@ -860,81 +860,109 @@ export const getAllEmployeesByCompanyId = async (req, res) => {
   }
 };
 
+
 export const getAllEmployeesByCompanyIdPagination = async (req, res) => {
   try {
     const { companyId } = req.params;
     const { page = 1, limit = 10, search = "" } = req.query;
 
     if (!companyId) {
-      return res.status(400).json({ message: "Company ID is required" });
+      return res.status(400).json({
+        success: false,
+        message: "Company ID is required",
+      });
     }
 
     const pageNumber = parseInt(page);
     const limitNumber = parseInt(limit);
     const skip = (pageNumber - 1) * limitNumber;
 
-    // Search filter
-    const searchFilter = search
-      ? {
-          $or: [
-            { firstName: { $regex: search, $options: "i" } },
-            { lastName: { $regex: search, $options: "i" } },
-            { personalEmail: { $regex: search, $options: "i" } },
-            { personalMobile: { $regex: search, $options: "i" } },
-             { employeeId: { $regex: search, $options: "i" } }
-          ]
-        }
-      : {};
+    // ✅ Step 1: Build search conditions for User model
+    const userFilter = {
+      companyId,
+      role: "employee",
+    };
 
-    // Query with user != null directly using match in populate
-    const employees = await Employee.find({
+    if (search && search.trim() !== "") {
+      userFilter.$or = [
+        { "profile.firstName": { $regex: search, $options: "i" } },
+        { "profile.lastName": { $regex: search, $options: "i" } },
+        { email: { $regex: search, $options: "i" } },
+        { "profile.phone": { $regex: search, $options: "i" } },
+        { "profile.designation": { $regex: search, $options: "i" } },
+        { "profile.department": { $regex: search, $options: "i" } },
+      ];
+    }
+
+    // Find all users matching the search (if any)
+    const matchedUsers = await User.find(userFilter).select("_id");
+    const userIds = matchedUsers.map((u) => u._id);
+
+    // ✅ Step 2: Build search for Employee model
+    const employeeFilter = { company: companyId };
+    const employeeSearchConditions = [];
+
+    if (search && search.trim() !== "") {
+      employeeSearchConditions.push(
+        { "employmentDetails.employeeId": { $regex: search, $options: "i" } },
+        { "employmentDetails.designation": { $regex: search, $options: "i" } },
+        { "employmentDetails.departmentName": { $regex: search, $options: "i" } }
+      );
+    }
+
+    // ✅ Combine filters (if no search => fetch all employees)
+    const finalFilter = {
       company: companyId,
-      ...searchFilter
-    })
-      .populate({
-        path: "user",
-        match: { role: "employee" },
-      })
-      .populate({ path: "employmentDetails.department", select: "name" })
-      .populate({
-        path: "employmentDetails.shift",
-        select: "name startTime endTime",
-      })
-      .populate({
-        path: "employmentDetails.reportingTo",
-        populate: { path: "user" },
-      })
-      .skip(skip)
-      .limit(limitNumber)
-      .lean();
+      $or: [
+        ...(userIds.length > 0 ? [{ user: { $in: userIds } }] : []),
+        ...employeeSearchConditions,
+      ],
+    };
 
-    // Filter null users BEFORE counting to keep counts accurate
-     const filteredEmployees = employees.filter(emp => emp.user);
+    // ✅ Step 3: Query employees with population & pagination
+    const [employees, total] = await Promise.all([
+      Employee.find(finalFilter)
+        .populate({
+          path: "user",
+          select:
+            "email role profile.firstName profile.lastName profile.phone profile.designation profile.department",
+        })
+        .populate({ path: "employmentDetails.department", select: "name" })
+        .populate({
+          path: "employmentDetails.shift",
+          select: "name startTime endTime",
+        })
+        .populate({
+          path: "employmentDetails.reportingTo",
+          populate: { path: "user", select: "email profile.firstName profile.lastName" },
+        })
+        .skip(skip)
+        .limit(limitNumber)
+        .lean(),
 
-    // Accurate total count with same condition
-    const total = await Employee.countDocuments({
-      company: companyId,
-      ...searchFilter,
-      user: { $ne: null } // ensures count matches
-    });
+      Employee.countDocuments(finalFilter),
+    ]);
 
     res.status(200).json({
+      success: true,
       message: "Employees fetched successfully",
-      count: filteredEmployees.length,
+      count: employees.length,
       total,
       currentPage: pageNumber,
       totalPages: Math.ceil(total / limitNumber),
-      employees: filteredEmployees,
+      employees,
     });
-
   } catch (error) {
     console.error("Error fetching employees:", error);
     res.status(500).json({
+      success: false,
       message: "Internal server error",
       error: error.message,
     });
   }
 };
+
+
 
 
 
